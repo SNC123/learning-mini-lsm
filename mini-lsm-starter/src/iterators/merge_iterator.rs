@@ -17,10 +17,13 @@
 
 use std::cmp::{self};
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
+use std::mem::swap;
 
 use anyhow::Result;
+use nom::AsBytes;
 
-use crate::key::KeySlice;
+use crate::key::{Key, KeySlice};
 
 use super::StorageIterator;
 
@@ -59,7 +62,18 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut new_iters: BinaryHeap<HeapWrapper<I>> = BinaryHeap::new();
+        for (i, iter) in iters.into_iter().enumerate() {
+            if !iter.is_valid() {
+                continue;
+            }
+            new_iters.push(HeapWrapper(i, iter));
+        }
+        let init_iter = new_iters.pop();
+        MergeIterator {
+            iters: new_iters,
+            current: init_iter,
+        }
     }
 }
 
@@ -69,18 +83,62 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        if let Some(heap_wrapper) = &self.current {
+            return heap_wrapper.1.key();
+        }
+        Key(&[])
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        if let Some(heap_wrapper) = &self.current {
+            return heap_wrapper.1.value().as_bytes();
+        }
+        &[]
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        match self.current.as_ref() {
+            None => false,
+            Some(current_iter) => current_iter.1.is_valid(),
+        }
     }
 
+    /// Reference: https://github.com/skyzh/mini-lsm-solution-checkpoint/commit/8e828d72badceb9b9255345da2c9bf247a0f15b1
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let current_iter = match self.current.as_mut() {
+            None => return Ok(()),
+            Some(heap_wrapper) => heap_wrapper,
+        };
+
+        while let Some(mut next_iter) = self.iters.peek_mut() {
+            if next_iter.1.key() == current_iter.1.key() {
+                if let Err(e) = next_iter.1.next() {
+                    PeekMut::pop(next_iter);
+                    return Err(e);
+                }
+                if !next_iter.1.is_valid() {
+                    PeekMut::pop(next_iter);
+                }
+            } else {
+                break;
+            }
+        }
+
+        current_iter.1.next()?;
+
+        if !current_iter.1.is_valid() {
+            if let Some(iter) = self.iters.pop() {
+                *current_iter = iter;
+            }
+            return Ok(());
+        }
+        // Compare and swap(maybe) with heap top
+        if let Some(mut next_iter) = self.iters.peek_mut() {
+            if *current_iter < *next_iter {
+                swap(current_iter, &mut next_iter);
+            }
+        }
+
+        Ok(())
     }
 }
